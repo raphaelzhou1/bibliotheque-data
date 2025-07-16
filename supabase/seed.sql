@@ -38,3 +38,13 @@ INSERT INTO auth.users (
         ''
     FROM generate_series(1, 1)
 );
+
+-- Insert admin user profile
+INSERT INTO profiles (id, display_name, role) 
+VALUES (
+  (SELECT id FROM auth.users WHERE email = 'zhoutianyu0426@gmail.com'),
+  'Admin User',
+  'admin'
+) ON CONFLICT (id) DO UPDATE SET
+  display_name = EXCLUDED.display_name,
+  role = EXCLUDED.role;
