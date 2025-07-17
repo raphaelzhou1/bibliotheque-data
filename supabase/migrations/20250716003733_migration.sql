@@ -128,16 +128,87 @@ create policy "Allow users to read their own profile"
   on profiles for select
   using (id = auth.uid());
 
+create policy "Allow users to insert their own profile"
+  on profiles for insert
+  with check (id = auth.uid());
+
 create policy "Allow users to update their own profile"
   on profiles for update
   using (id = auth.uid());
 
--- Storage bucket policy for private books
-create policy private_book_owner
+-- Storage bucket policy for private books - select, update, delete
+create policy private_book_select
   on storage.objects
-  for all using (
+  for select using (
       bucket_id = 'private-books'
   and (metadata->>'owner_id')::uuid = auth.uid()
+);
+
+create policy private_book_insert
+  on storage.objects
+  for insert with check (
+      bucket_id = 'private-books'
+  and (metadata->>'owner_id')::uuid = auth.uid()
+);
+
+create policy private_book_update
+  on storage.objects
+  for update using (
+      bucket_id = 'private-books'
+  and (metadata->>'owner_id')::uuid = auth.uid()
+);
+
+create policy private_book_delete
+  on storage.objects
+  for delete using (
+      bucket_id = 'private-books'
+  and (metadata->>'owner_id')::uuid = auth.uid()
+);
+
+-- Storage bucket policy for public books - allow reading public books
+create policy public_book_read
+  on storage.objects
+  for select using (bucket_id = 'public-books');
+
+-- Storage bucket policy for public books - only admins and owners can upload
+create policy public_book_upload
+  on storage.objects
+  for insert with check (
+      bucket_id = 'public-books'
+  and (
+    (metadata->>'owner_id')::uuid = auth.uid()
+    or exists (
+      select 1 from profiles p
+      where p.id = auth.uid() and p.role = 'admin'
+    )
+  )
+);
+
+-- Storage bucket policy for public books - only admins and owners can update/delete
+create policy public_book_manage
+  on storage.objects
+  for update using (
+      bucket_id = 'public-books'
+  and (
+    (metadata->>'owner_id')::uuid = auth.uid()
+    or exists (
+      select 1 from profiles p
+      where p.id = auth.uid() and p.role = 'admin'
+    )
+  )
+);
+
+create policy public_book_delete
+  on storage.objects
+  for delete using (
+      bucket_id = 'public-books'
+  and (
+    (metadata->>'owner_id')::uuid = auth.uid()
+    or exists (
+      select 1 from profiles p
+      where p.id = auth.uid() and p.role = 'admin'
+    )
+  )
 );
 
 -- Function to handle new user signup

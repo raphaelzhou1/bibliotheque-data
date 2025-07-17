@@ -5,26 +5,31 @@
 // Setup type definitions for built-in Supabase Runtime APIs
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "@supabase/supabase-js"
+import JSZip from "jszip"
 
 interface BookMetadata {
   title: string;
   author: string;
   language: string;
-  file: File;
+  originalFilename: string;
   side: 'foreign' | 'native';
 }
 
-interface UploadRequest {
-  foreignFile: File;
-  nativeFile: File;
-  foreignTitle: string;
-  foreignAuthor: string;
-  foreignLanguage: string;
-  nativeTitle: string;
-  nativeAuthor: string;
-  nativeLanguage: string;
-  visibility: 'public' | 'private';
-  ownerId: string;
+interface ProcessedFile {
+  data: Uint8Array;
+  filename: string;
+  originalSize: number;
+  compressedSize: number;
+}
+
+// Helper function to sanitize filename for storage
+function sanitizeFilename(filename: string): string {
+  return filename
+    .replace(/[^a-zA-Z0-9\-_.]/g, '_') // Replace special chars with underscore
+    .replace(/_{2,}/g, '_') // Replace multiple underscores with single
+    .replace(/^_+|_+$/g, '') // Remove leading/trailing underscores
+    .replace(" ", '') // Remove leading/trailing underscores
+    .toLowerCase();
 }
 
 console.log("Add new book function loaded!")
@@ -81,48 +86,130 @@ Deno.serve(async (req) => {
       )
     }
 
-    // Validate file types
-    if (!foreignFile.name.endsWith('.epub') || !nativeFile.name.endsWith('.epub')) {
-      return new Response(
-        JSON.stringify({ error: 'Only EPUB files are supported' }),
-        { 
-          status: 400,
-          headers: { 
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
+    console.log(`Processing files: ${foreignFile.name} (${foreignFile.size} bytes), ${nativeFile.name} (${nativeFile.size} bytes)`)
+
+    // Helper function to process uploaded file (ZIP or direct EPUB)
+    const processUploadedFile = async (file: File, expectedSide: 'foreign' | 'native'): Promise<ProcessedFile> => {
+      const arrayBuffer = await file.arrayBuffer()
+      const uint8Array = new Uint8Array(arrayBuffer)
+      
+      // Check if it's a ZIP file
+      if (file.name.endsWith('.zip') || file.type === 'application/zip') {
+        console.log(`Decompressing ZIP file: ${file.name}`)
+        
+        try {
+          const zip = await JSZip.loadAsync(uint8Array)
+          
+          // Find EPUB files in the ZIP
+          const epubFiles = Object.keys(zip.files).filter(filename => 
+            filename.endsWith('.epub') && !zip.files[filename].dir
+          )
+          
+          if (epubFiles.length === 0) {
+            throw new Error(`No EPUB files found in ${file.name}`)
           }
+          
+          if (epubFiles.length > 1) {
+            console.warn(`Multiple EPUB files found in ${file.name}, using first one: ${epubFiles[0]}`)
+          }
+          
+          const epubFilename = epubFiles[0]
+          const epubFile = zip.files[epubFilename]
+          const epubData = await epubFile.async('uint8array')
+          
+          console.log(`Extracted ${epubFilename} from ZIP: ${epubData.length} bytes (was ${file.size} bytes compressed)`)
+          
+          return {
+            data: epubData,
+            filename: epubFilename,
+            originalSize: epubData.length,
+            compressedSize: file.size
+          }
+        } catch (error) {
+          throw new Error(`Failed to decompress ZIP file ${file.name}: ${error.message}`)
         }
-      )
+      } else if (file.name.endsWith('.epub')) {
+        // Direct EPUB file
+        return {
+          data: uint8Array,
+          filename: file.name,
+          originalSize: file.size,
+          compressedSize: file.size
+        }
+      } else {
+        throw new Error(`Unsupported file type: ${file.name}. Only EPUB and ZIP files are supported.`)
+      }
+    }
+
+    // Helper function to ensure storage bucket exists with proper configuration
+    const ensureBucketExists = async (bucketName: string, isPublic: boolean) => {
+      console.log(`Ensuring bucket exists: ${bucketName} (public: ${isPublic})`)
+      
+      // Try to create bucket
+      const { data: bucketData, error: bucketError } = await supabase.storage.createBucket(bucketName, {
+        public: isPublic,
+        allowedMimeTypes: ['application/epub+zip', 'application/zip'],
+        fileSizeLimit: 52428800, // 50MB in bytes
+      })
+      
+      if (bucketError) {
+        if (bucketError.message.includes('already exists')) {
+          console.log(`Bucket ${bucketName} already exists`)
+          
+          // Update bucket settings if it exists but might have wrong config
+          const { error: updateError } = await supabase.storage.updateBucket(bucketName, {
+            public: isPublic,
+            allowedMimeTypes: ['application/epub+zip', 'application/zip'],
+            fileSizeLimit: 52428800,
+          })
+          
+          if (updateError) {
+            console.warn(`Could not update bucket settings: ${updateError.message}`)
+          }
+        } else {
+          throw new Error(`Failed to create bucket ${bucketName}: ${bucketError.message}`)
+        }
+      } else {
+        console.log(`Created new bucket: ${bucketName}`)
+      }
     }
 
     // Helper function to upload file to storage
-    const uploadFileToStorage = async (file: File, filename: string) => {
+    const uploadFileToStorage = async (fileData: Uint8Array, originalFilename: string, side: 'foreign' | 'native') => {
       const bucketName = visibility === 'public' ? 'public-books' : 'private-books'
       
-      // Create bucket if it doesn't exist
-      const { error: bucketError } = await supabase.storage.createBucket(bucketName, {
-        public: visibility === 'public'
-      })
-      
-      // Ignore error if bucket already exists
-      if (bucketError && !bucketError.message.includes('already exists')) {
-        console.error('Bucket creation error:', bucketError)
-      }
+      // Ensure bucket exists
+      await ensureBucketExists(bucketName, visibility === 'public')
 
+      // Sanitize filename and create storage path
+      const sanitizedFilename = sanitizeFilename(originalFilename)
+      const timestamp = Date.now()
+      const storagePath = `${ownerId}/${side}_${timestamp}_${sanitizedFilename}`
+      
+      console.log(`Original filename: ${originalFilename}`)
+      console.log(`Sanitized storage path: ${storagePath}`)
+
+      // Create a Blob from the Uint8Array for upload
+      const blob = new Blob([fileData], { type: 'application/epub+zip' })
+      
       const { data, error } = await supabase.storage
         .from(bucketName)
-        .upload(filename, file, {
+        .upload(storagePath, blob, {
           cacheControl: '3600',
           upsert: false,
           metadata: {
-            owner_id: ownerId
+            owner_id: ownerId,
+            original_size: fileData.length.toString(),
+            original_filename: originalFilename,
           }
         })
 
       if (error) {
+        console.error(`Storage upload error:`, error)
         throw new Error(`File upload failed: ${error.message}`)
       }
 
+      console.log(`Successfully uploaded to: ${data.path}`)
       return data.path
     }
 
@@ -133,7 +220,7 @@ Deno.serve(async (req) => {
         visibility: visibility as 'public' | 'private',
         language_code: metadata.language || 'en',
         side: metadata.side,
-        title: metadata.title || metadata.file.name.replace('.epub', ''),
+        title: metadata.title || metadata.originalFilename.replace('.epub', ''),
         author: metadata.author || '',
         epub_path: epubPath,
         published_on: null,
@@ -155,17 +242,19 @@ Deno.serve(async (req) => {
       return data
     }
 
-    // Generate unique filenames
-    const timestamp = Date.now()
-    const foreignFilename = `${ownerId}/foreign_${timestamp}_${foreignFile.name}`
-    const nativeFilename = `${ownerId}/native_${timestamp}_${nativeFile.name}`
-
-    // Upload files to storage
-    console.log('Uploading foreign book:', foreignFilename)
-    const foreignEpubPath = await uploadFileToStorage(foreignFile, foreignFilename)
+    // Process uploaded files
+    console.log('Processing foreign file...')
+    const foreignProcessed = await processUploadedFile(foreignFile, 'foreign')
     
-    console.log('Uploading native book:', nativeFilename)
-    const nativeEpubPath = await uploadFileToStorage(nativeFile, nativeFilename)
+    console.log('Processing native file...')
+    const nativeProcessed = await processUploadedFile(nativeFile, 'native')
+
+    // Upload files to storage with sanitized names
+    console.log('Uploading foreign book to storage...')
+    const foreignEpubPath = await uploadFileToStorage(foreignProcessed.data, foreignProcessed.filename, 'foreign')
+    
+    console.log('Uploading native book to storage...')
+    const nativeEpubPath = await uploadFileToStorage(nativeProcessed.data, nativeProcessed.filename, 'native')
 
     // Create book records
     console.log('Creating foreign book record')
@@ -173,7 +262,7 @@ Deno.serve(async (req) => {
       title: foreignTitle,
       author: foreignAuthor,
       language: foreignLanguage,
-      file: foreignFile,
+      originalFilename: foreignProcessed.filename,
       side: 'foreign'
     }, foreignEpubPath)
 
@@ -182,7 +271,7 @@ Deno.serve(async (req) => {
       title: nativeTitle,
       author: nativeAuthor,
       language: nativeLanguage,
-      file: nativeFile,
+      originalFilename: nativeProcessed.filename,
       side: 'native'
     }, nativeEpubPath)
 
@@ -201,7 +290,8 @@ Deno.serve(async (req) => {
 
     if (pairError) {
       // Clean up uploaded files and created books on failure
-      await supabase.storage.from(visibility === 'public' ? 'public-books' : 'private-books').remove([foreignEpubPath, nativeEpubPath])
+      const bucketName = visibility === 'public' ? 'public-books' : 'private-books'
+      await supabase.storage.from(bucketName).remove([foreignEpubPath, nativeEpubPath])
       await supabase.from('books').delete().eq('id', foreignBook.id)
       await supabase.from('books').delete().eq('id', nativeBook.id)
       
@@ -216,6 +306,14 @@ Deno.serve(async (req) => {
         bookPairId: bookPair.id,
         foreignBookId: foreignBook.id,
         nativeBookId: nativeBook.id,
+        compressionInfo: {
+          foreignOriginalSize: foreignProcessed.originalSize,
+          foreignCompressedSize: foreignProcessed.compressedSize,
+          nativeOriginalSize: nativeProcessed.originalSize,
+          nativeCompressedSize: nativeProcessed.compressedSize,
+          compressionRatio: ((foreignProcessed.compressedSize + nativeProcessed.compressedSize) / 
+                           (foreignProcessed.originalSize + nativeProcessed.originalSize) * 100).toFixed(1) + '%'
+        },
         message: 'Books uploaded and paired successfully!'
       }),
       { 
@@ -229,7 +327,14 @@ Deno.serve(async (req) => {
   } catch (error) {
     console.error('Error in add-new-book function:', error)
     return new Response(
-      JSON.stringify({ error: error.message || 'An unexpected error occurred' }),
+      JSON.stringify({ 
+        error: error.message || 'An unexpected error occurred',
+        hint: error.message?.includes('decompress') ? 
+          'Try uploading the EPUB files directly without compression, or ensure the ZIP file contains valid EPUB files.' :
+          error.message?.includes('Invalid key') ?
+          'Filename contains invalid characters. Please rename your file to use only letters, numbers, hyphens, and underscores.' :
+          'Check file size limits and ensure files are valid EPUB format.'
+      }),
       { 
         status: 500,
         headers: { 
@@ -244,13 +349,13 @@ Deno.serve(async (req) => {
 /* To invoke locally:
 
   1. Run `supabase start` (see: https://supabase.com/docs/reference/cli/supabase-start)
-  2. Make an HTTP request:
+  2. Make an HTTP request with ZIP or EPUB files:
 
   curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/add-new-book' \
     --header 'Authorization: Bearer [YOUR_TOKEN]' \
     --header 'Content-Type: multipart/form-data' \
-    --form 'foreignFile=@/path/to/foreign.epub' \
-    --form 'nativeFile=@/path/to/native.epub' \
+    --form 'foreignFile=@/path/to/foreign.zip' \
+    --form 'nativeFile=@/path/to/native.zip' \
     --form 'foreignTitle=Le Petit Prince' \
     --form 'foreignAuthor=Antoine de Saint-Exupéry' \
     --form 'foreignLanguage=fr' \
