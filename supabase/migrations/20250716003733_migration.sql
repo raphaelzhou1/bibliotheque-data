@@ -250,3 +250,197 @@ begin
   end if;
 end;
 $$ language plpgsql security definer;
+
+-- EPUB Content Functions and Views
+-- Function to extract EPUB metadata from json_blob
+create or replace function public.get_epub_metadata(book_record books)
+returns jsonb as $$
+begin
+  return book_record.json_blob->'metadata';
+end;
+$$ language plpgsql stable;
+
+-- Function to extract EPUB structure info from json_blob
+create or replace function public.get_epub_structure(book_record books)
+returns jsonb as $$
+begin
+  return book_record.json_blob->'structure';
+end;
+$$ language plpgsql stable;
+
+-- Function to get chapter count from EPUB content
+create or replace function public.get_chapter_count(book_record books)
+returns integer as $$
+begin
+  return coalesce((book_record.json_blob->'structure'->>'totalChapters')::integer, 0);
+end;
+$$ language plpgsql stable;
+
+-- Function to get word count from EPUB content
+create or replace function public.get_word_count(book_record books)
+returns integer as $$
+begin
+  return coalesce((book_record.json_blob->'structure'->>'wordCount')::integer, 0);
+end;
+$$ language plpgsql stable;
+
+-- Function to get estimated reading time from EPUB content
+create or replace function public.get_reading_time(book_record books)
+returns integer as $$
+begin
+  return coalesce((book_record.json_blob->'structure'->>'estimatedReadingTime')::integer, 0);
+end;
+$$ language plpgsql stable;
+
+-- Function to search within EPUB chapter content
+create or replace function public.search_epub_content(
+  book_id uuid,
+  search_query text
+)
+returns table(
+  chapter_id text,
+  chapter_title text,
+  chapter_order integer,
+  excerpt text,
+  rank real
+) as $$
+begin
+  return query
+  select 
+    (chapter.value->>'id')::text,
+    (chapter.value->>'title')::text,
+    (chapter.value->>'order')::integer,
+    substring(chapter.value->>'textContent' from 1 for 200) as excerpt,
+    ts_rank(
+      to_tsvector('english', chapter.value->>'textContent'),
+      plainto_tsquery('english', search_query)
+    ) as rank
+  from books b,
+       jsonb_array_elements(b.json_blob->'chapters') as chapter
+  where b.id = book_id
+    and b.json_blob is not null
+    and to_tsvector('english', chapter.value->>'textContent') @@ plainto_tsquery('english', search_query)
+  order by rank desc, (chapter.value->>'order')::integer;
+end;
+$$ language plpgsql stable;
+
+-- Function to get table of contents from EPUB
+create or replace function public.get_epub_toc(book_record books)
+returns jsonb as $$
+begin
+  return book_record.json_blob->'structure'->'tableOfContents';
+end;
+$$ language plpgsql stable;
+
+-- Function to get specific chapter content by order
+create or replace function public.get_chapter_by_order(
+  book_id uuid,
+  chapter_order integer
+)
+returns jsonb as $$
+declare
+  result jsonb;
+begin
+  select chapter.value
+  into result
+  from books b,
+       jsonb_array_elements(b.json_blob->'chapters') as chapter
+  where b.id = book_id
+    and (chapter.value->>'order')::integer = chapter_order;
+  
+  return result;
+end;
+$$ language plpgsql stable;
+
+-- Function to get chapter content by ID
+create or replace function public.get_chapter_by_id(
+  book_id uuid,
+  chapter_id text
+)
+returns jsonb as $$
+declare
+  result jsonb;
+begin
+  select chapter.value
+  into result
+  from books b,
+       jsonb_array_elements(b.json_blob->'chapters') as chapter
+  where b.id = book_id
+    and chapter.value->>'id' = chapter_id;
+  
+  return result;
+end;
+$$ language plpgsql stable;
+
+-- Function to update search vector with EPUB content
+create or replace function public.update_book_search_vector()
+returns trigger as $$
+begin
+  -- Combine title, author, and all chapter text content for search
+  new.search_vector := 
+    setweight(to_tsvector('english', coalesce(new.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(new.author, '')), 'B') ||
+    setweight(
+      to_tsvector('english', 
+        coalesce(
+          string_agg(
+            chapter.value->>'textContent', ' '
+          ), ''
+        )
+      ), 'C'
+    )
+  from jsonb_array_elements(coalesce(new.json_blob->'chapters', '[]'::jsonb)) as chapter;
+  
+  return new;
+end;
+$$ language plpgsql;
+
+-- Trigger to automatically update search vector when book is inserted/updated
+create trigger update_books_search_vector
+  before insert or update on books
+  for each row execute function update_book_search_vector();
+
+-- View for enhanced book information with EPUB metadata
+create view book_details as
+select 
+  b.*,
+  get_chapter_count(b) as chapter_count,
+  get_word_count(b) as word_count,
+  get_reading_time(b) as reading_time_minutes,
+  (b.json_blob->'metadata'->>'publisher') as publisher,
+  (b.json_blob->'metadata'->>'publishedDate') as epub_published_date,
+  (b.json_blob->'metadata'->>'description') as description,
+  (b.json_blob->'parsing'->>'parsedAt') as content_parsed_at,
+  (b.json_blob->'parsing'->>'epubVersion') as epub_version,
+  case 
+    when b.json_blob is not null then true 
+    else false 
+  end as has_parsed_content
+from books b;
+
+-- View for book pairs with aggregated statistics  
+create view book_pair_details as
+select 
+  bp.*,
+  fb.title as foreign_title,
+  fb.author as foreign_author,
+  fb.language_code as foreign_language,
+  get_chapter_count(fb) as foreign_chapter_count,
+  get_word_count(fb) as foreign_word_count,
+  nb.title as native_title,
+  nb.author as native_author,
+  nb.language_code as native_language,
+  get_chapter_count(nb) as native_chapter_count,
+  get_word_count(nb) as native_word_count,
+  case 
+    when get_chapter_count(fb) > 0 and get_chapter_count(nb) > 0 then true
+    else false
+  end as both_books_parsed
+from book_pairs bp
+join books fb on bp.foreign_book_id = fb.id
+join books nb on bp.native_book_id = nb.id;
+
+-- Indexes for better performance on EPUB queries
+create index books_json_metadata_gin on books using gin((json_blob->'metadata'));
+create index books_json_structure_gin on books using gin((json_blob->'structure'));
+create index books_json_chapters_gin on books using gin((json_blob->'chapters'));
