@@ -1,7 +1,9 @@
 {
   "imports": {
     "@supabase/supabase-js": "npm:@supabase/supabase-js@2",
-    "jszip": "npm:jszip@3.10.1"
+    "fflate": "npm:fflate@0.8.1",
+    "fast-xml-parser": "npm:fast-xml-parser@4.3.4",
+    "dompurify": "npm:dompurify@3.0.8"
   },
   "compilerOptions": {
     "lib": ["dom", "dom.iterable", "dom.asynciterable", "deno.ns"],
