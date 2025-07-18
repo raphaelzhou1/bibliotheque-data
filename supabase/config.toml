@@ -343,46 +343,4 @@ entrypoint = "./functions/add-new-book/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/add-new-book/*.html" ]
 
-[functions.process-epub-file]
-enabled = true
-verify_jwt = true
-import_map = "./functions/process-epub-file/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/process-epub-file/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/process-epub-file/*.html" ]
 
-[functions.parse-epub-content]
-enabled = true
-verify_jwt = true
-import_map = "./functions/parse-epub-content/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/parse-epub-content/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/parse-epub-content/*.html" ]
-
-[functions.upload-to-storage]
-enabled = true
-verify_jwt = true
-import_map = "./functions/upload-to-storage/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/upload-to-storage/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/upload-to-storage/*.html" ]
-
-[functions.create-book-record]
-enabled = true
-verify_jwt = true
-import_map = "./functions/create-book-record/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/create-book-record/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/create-book-record/*.html" ]

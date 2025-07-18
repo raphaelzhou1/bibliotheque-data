@@ -8,7 +8,7 @@ import { createClient } from "@supabase/supabase-js"
 
 // Performance-optimized imports
 // Using dynamic imports to handle potential module resolution issues
-let fflate: any, XMLParser: any, DOMPurify: any;
+let fflate: any, XMLParser: any, DOMPurify: any, entities: any;
 
 try {
   const fflateModule = await import("https://esm.sh/fflate@0.8.1");
@@ -19,6 +19,9 @@ try {
   
   const domPurifyModule = await import("https://esm.sh/dompurify@3.0.8");
   DOMPurify = domPurifyModule.default;
+  
+  const heModule = await import("https://esm.sh/he@1.2.0");
+  entities = heModule;
 } catch (error) {
   console.warn("Failed to load performance libraries, falling back to basic implementations");
   // Fallback implementations will be used
@@ -179,53 +182,283 @@ if (XMLParser) {
   });
 }
 
-// Enhanced HTML sanitization using DOMPurify with plain text extraction
+// Modern HTML text extraction using DOMPurify + textContent + he entity decoding
 function extractTextFromHtml(htmlContent: string): string {
-  console.log(`Sanitizing HTML content (${htmlContent.length} chars)`);
+  console.log(`Processing HTML content (${htmlContent.length} chars) with modern parser`);
   const startTime = performance.now();
   
   try {
+    // Step 1: Sanitize HTML with DOMPurify to remove XSS and normalize structure
+    let cleanHtml = htmlContent;
     if (DOMPurify?.sanitize) {
-      // First, sanitize the HTML with DOMPurify (RETURN_DOM: false for text extraction)
-      const sanitized = DOMPurify.sanitize(htmlContent, {
-        WHOLE_DOCUMENT: false,
+      cleanHtml = DOMPurify.sanitize(htmlContent, { 
         RETURN_DOM: false,
-        RETURN_DOM_FRAGMENT: false,
-        RETURN_DOM_IMPORT: false,
-        SANITIZE_DOM: true,
-        KEEP_CONTENT: true,
-        FORBID_TAGS: ['script', 'style', 'link', 'meta', 'head'],
-        FORBID_ATTR: ['style', 'on*'],
-        ALLOW_DATA_ATTR: false
+        ALLOWED_TAGS: [], // Strip all tags, keep only text content
+        KEEP_CONTENT: true // Preserve text inside removed tags
       });
-      
-      // Enhanced plain-text cleaner that preserves word boundaries
-      const textContent = sanitized
-        .replace(/<[^>]+>/g, ' ') // Replace all HTML tags with spaces
-        .replace(/&[a-zA-Z0-9#]+;/g, ' ') // Replace HTML entities with spaces
-        .replace(/\s+/g, ' ') // Normalize whitespace
-        .replace(/^\s+|\s+$/g, '') // Trim leading/trailing whitespace
-        .replace(/[^\w\s\-'.,:;!?]/g, ' ') // Replace special chars but keep punctuation
-        .replace(/\s+/g, ' ') // Final whitespace normalization
-        .trim();
-      
-      const sanitizeTime = performance.now() - startTime;
-      console.log(`HTML sanitized and text extracted in ${sanitizeTime.toFixed(2)}ms`);
-      
-      return textContent;
+      console.log(`DOMPurify sanitization completed`);
+    } else {
+      // Basic fallback: remove dangerous content
+      cleanHtml = htmlContent
+        .replace(/<script[^>]*>.*?<\/script>/gis, '')
+        .replace(/<style[^>]*>.*?<\/style>/gis, '')
+        .replace(/<head[^>]*>.*?<\/head>/gis, '');
     }
+    
+    // Step 2: Use DOM parsing to extract clean text content
+    let textContent = '';
+    
+    // Try using DOMParser for proper HTML parsing
+    try {
+      // Create a minimal DOM environment for text extraction
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(cleanHtml, 'text/html');
+      textContent = doc.documentElement.textContent || doc.body?.textContent || '';
+      console.log(`DOM textContent extraction successful`);
+    } catch (domError) {
+      console.warn(`DOM parsing failed, using regex fallback: ${domError.message}`);
+      // Fallback: regex-based tag removal
+      textContent = cleanHtml
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    
+    // Step 3: Decode HTML entities using 'he' library for accurate Unicode
+    let finalText = textContent;
+    if (entities?.decode) {
+      finalText = entities.decode(textContent);
+      console.log(`HTML entities decoded with 'he' library`);
+    } else {
+      // Enhanced fallback entity decoding
+      finalText = textContent
+        .replace(/&rsquo;/g, "'")
+        .replace(/&lsquo;/g, "'")
+        .replace(/&rdquo;/g, '"')
+        .replace(/&ldquo;/g, '"')
+        .replace(/&ndash;/g, '–')
+        .replace(/&mdash;/g, '—')
+        .replace(/&hellip;/g, '…')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&eacute;/gi, 'é')
+        .replace(/&egrave;/gi, 'è')
+        .replace(/&ecirc;/gi, 'ê')
+        .replace(/&agrave;/gi, 'à')
+        .replace(/&acirc;/gi, 'â')
+        .replace(/&ccedil;/gi, 'ç')
+        .replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num)))
+        .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+    
+    // Step 4: Final cleanup and normalization
+    finalText = finalText
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .replace(/\r\n|\r|\n/g, ' ') // Convert line breaks to spaces
+      .trim();
+    
+    const processTime = performance.now() - startTime;
+    console.log(`Modern HTML processing completed in ${processTime.toFixed(2)}ms`);
+    console.log(`Output: ${finalText.length} chars clean text`);
+    
+    return finalText;
   } catch (error) {
-    console.warn(`HTML sanitization failed, falling back to basic method: ${error.message}`);
+    console.error(`Modern HTML processing failed: ${error.message}`);
+    
+    // Ultimate fallback to very basic processing
+    return htmlContent
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+}
+
+// Modern front-matter detection using EPUB structure + content analysis
+function isFrontMatterPage(htmlContent: string, textContent: string, wordCount: number, manifestItem: any): boolean {
+  const lowerText = textContent.toLowerCase().trim();
+  const normalizedText = textContent.trim();
+  
+  // Rule 1: Very short pages are likely title/part dividers
+  if (wordCount < 20) {
+    console.log(`Flagging as front-matter: ${wordCount} words - "${normalizedText.substring(0, 50)}..."`);
+    return true;
   }
   
-  // Fallback to basic method if DOMPurify fails or is not available
-  return htmlContent
-    .replace(/<script[^>]*>.*?<\/script>/gi, '')
-    .replace(/<style[^>]*>.*?<\/style>/gi, '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&[^;]+;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // Rule 2: Respect EPUB spine linear="no" attribute
+  if (manifestItem?.linear === 'no') {
+    console.log(`Flagging as front-matter: spine linear="no" - "${normalizedText.substring(0, 50)}..."`);
+    return true;
+  }
+  
+  // Rule 3: Common front-matter patterns (author, title, copyright, etc.)
+  const frontMatterPatterns = [
+    // Author name only
+    /^(albert\s+)?camus\s*$/i,
+    /^(antoine\s+de\s+)?saint[- ]exupéry\s*$/i,
+    
+    // Title pages
+    /^l[''']étranger\s*$/i,
+    /^(le\s+)?petit[- ]prince\s*$/i,
+    /^the\s+stranger\s*$/i,
+    /^the\s+little\s+prince\s*$/i,
+    
+    // Part/section dividers
+    /^(première|deuxième|troisième)\s+partie\s*$/i,
+    /^part\s+(one|two|three|i+)\s*$/i,
+    /^partie\s+\d+\s*$/i,
+    
+    // Chapter headers without content
+    /^chapitre\s+\d+\s*$/i,
+    /^chapter\s+\d+\s*$/i,
+    /^(prologue|épilogue|epilogue)\s*$/i,
+    
+    // Legal/publishing
+    /^(copyright|©|\(c\))/i,
+    /^(tous\s+droits\s+réservés|all\s+rights\s+reserved)/i,
+    /^(éditions?|publisher?)/i,
+    
+    // TOC/Navigation
+    /^(table\s+des?\s+matières?|contents?|sommaire)\s*$/i,
+    
+    // Standalone roman numerals or numbers (page markers)
+    /^[ivxlc]+\s*$/i,
+    /^\d+\s*$/,
+    
+    // Dedication/Foreword
+    /^(dédicace?|dedication|avant[- ]propos|foreword|préface|preface)\s*$/i
+  ];
+  
+  // Check if the entire text matches front-matter patterns
+  if (frontMatterPatterns.some(pattern => pattern.test(normalizedText))) {
+    console.log(`Flagging as front-matter: pattern match - "${normalizedText}"`);
+    return true;
+  }
+  
+  // Rule 4: Pages that are mostly just author/title repeated
+  const keywordDensity = calculateKeywordDensity(lowerText, [
+    'albert', 'camus', 'étranger', 'stranger', 'saint-exupéry', 'petit prince', 'little prince',
+    'première partie', 'deuxième partie', 'part one', 'part two'
+  ]);
+  
+  if (keywordDensity > 0.7) { // More than 70% title/author keywords
+    console.log(`Flagging as front-matter: high keyword density (${(keywordDensity * 100).toFixed(1)}%) - "${normalizedText.substring(0, 50)}..."`);
+    return true;
+  }
+  
+  // Rule 5: Check for fixed-layout/image-heavy pages
+  const imageRatio = (htmlContent.match(/<img/gi) || []).length / Math.max(wordCount, 1);
+  if (imageRatio > 0.5 && wordCount < 50) {
+    console.log(`Flagging as front-matter: image-heavy page (${imageRatio.toFixed(2)} img/word ratio)`);
+    return true;
+  }
+  
+  return false;
+}
+
+// Helper function to calculate keyword density
+function calculateKeywordDensity(text: string, keywords: string[]): number {
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return 0;
+  
+  const keywordMatches = keywords.reduce((count, keyword) => {
+    const keywordWords = keyword.split(/\s+/);
+    return count + (text.includes(keyword.toLowerCase()) ? keywordWords.length : 0);
+  }, 0);
+  
+  return keywordMatches / words.length;
+}
+
+// Check if a TOC title indicates front-matter rather than actual content
+function isFrontMatterTitle(title: string): boolean {
+  const normalizedTitle = title.toLowerCase().trim();
+  
+  const frontMatterTitles = [
+    // Common front-matter section titles
+    'cover', 'title page', 'copyright', 'dedication', 'acknowledgments',
+    'table of contents', 'contents', 'preface', 'foreword', 'introduction',
+    'prologue', 'about the author', 'about this book',
+    
+    // French equivalents
+    'couverture', 'page de titre', 'droits', 'dédicace', 'remerciements',
+    'table des matières', 'sommaire', 'préface', 'avant-propos', 
+    'prologue', 'à propos de l\'auteur',
+    
+    // Part dividers
+    'part one', 'part two', 'part three', 'part i', 'part ii', 'part iii',
+    'première partie', 'deuxième partie', 'troisième partie',
+    'partie 1', 'partie 2', 'partie 3',
+    
+    // Empty or minimal titles
+    '', 'untitled', 'sans titre'
+  ];
+  
+  return frontMatterTitles.some(frontMatter => 
+    normalizedTitle === frontMatter || 
+    normalizedTitle.startsWith(frontMatter + ' ') ||
+    normalizedTitle.endsWith(' ' + frontMatter)
+  );
+}
+
+// Enhanced chapter title extraction with better French support
+function extractChapterTitleEnhanced(htmlContent: string, textContent: string, manifestId: string): string {
+  try {
+    // Try XML parser first for proper HTML structure parsing
+    if (xmlParser) {
+      const parsed = xmlParser.parse(htmlContent);
+      
+      // Look for title in various HTML structures
+      const candidates = [
+        parsed.html?.head?.title?.['#text'],
+        parsed.html?.body?.h1?.['#text'],
+        parsed.html?.body?.h2?.['#text'],
+        parsed.html?.body?.h3?.['#text'],
+        parsed.h1?.['#text'],
+        parsed.h2?.['#text'],
+        parsed.h3?.['#text']
+      ].filter(Boolean);
+      
+      if (candidates.length > 0) {
+        return candidates[0].trim();
+      }
+    }
+    
+    // Fallback to regex-based extraction
+    const titlePatterns = [
+      /<title[^>]*>([^<]+)<\/title>/i,
+      /<h1[^>]*>([^<]+)<\/h1>/i,
+      /<h2[^>]*>([^<]+)<\/h2>/i,
+      /<h3[^>]*>([^<]+)<\/h3>/i,
+      /<p[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/p>/i
+    ];
+    
+    for (const pattern of titlePatterns) {
+      const match = htmlContent.match(pattern);
+      if (match && match[1].trim()) {
+        let title = match[1].trim();
+        
+        // Decode entities in the title
+        if (entities?.decodeHTML) {
+          title = entities.decodeHTML(title);
+        }
+        
+        return title;
+      }
+    }
+    
+    // Try to extract from the first significant text content
+    const firstSentence = textContent.split('.')[0].trim();
+    if (firstSentence.length > 5 && firstSentence.length < 100) {
+      return firstSentence;
+    }
+    
+    return manifestId.replace(/^(id|chapter|ch|chap)/i, 'Chapter ');
+  } catch (error) {
+    console.warn(`Title extraction failed: ${error.message}`);
+    return manifestId || 'Unknown Chapter';
+  }
 }
 
 // Helper function to sanitize filename for storage
@@ -277,11 +510,15 @@ async function parseEpubContent(epubData: Uint8Array, filename: string): Promise
     const packageData = parsePackageDocumentFast(packageXml);
     console.log(`Parsed package document, found ${packageData.spine.length} spine items`);
     
-    // Parse navigation document if available
+    // Parse navigation document with EPUB 3 support + NCX fallback
     let tableOfContents: TocEntry[] = [];
+    let tocMapping: Map<string, TocEntry> = new Map();
+    
     try {
+      // Try EPUB 3 navigation document first
       const navItem = packageData.manifest.find(item => 
-        item.properties?.includes('nav') || item.mediaType === 'application/xhtml+xml'
+        item.properties?.includes('nav') || 
+        (item.mediaType === 'application/xhtml+xml' && item.href.includes('nav'))
       );
       
       if (navItem) {
@@ -290,17 +527,50 @@ async function parseEpubContent(epubData: Uint8Array, filename: string): Promise
         if (navFile) {
           const navContent = new TextDecoder().decode(navFile);
           tableOfContents = parseNavigationDocumentFast(navContent);
-          console.log(`Parsed navigation document, found ${tableOfContents.length} TOC entries`);
+          console.log(`✅ Parsed EPUB 3 navigation document, found ${tableOfContents.length} TOC entries`);
         }
       }
+      
+      // Fallback to NCX file (EPUB 2 standard)
+      if (tableOfContents.length === 0) {
+        const ncxItem = packageData.manifest.find(item => 
+          item.mediaType === 'application/x-dtbncx+xml' || item.href.includes('.ncx')
+        );
+        
+        if (ncxItem) {
+          const ncxPath = resolveHref(packagePath, ncxItem.href);
+          const ncxFile = files[ncxPath];
+          if (ncxFile) {
+            const ncxContent = new TextDecoder().decode(ncxFile);
+            tableOfContents = parseNCXDocument(ncxContent);
+            console.log(`✅ Parsed NCX navigation, found ${tableOfContents.length} TOC entries`);
+          }
+        }
+      }
+      
+      // Create href-to-TOC mapping for chapter organization
+      const buildTocMapping = (entries: TocEntry[]) => {
+        entries.forEach(entry => {
+          const cleanHref = entry.href.split('#')[0]; // Remove fragment identifiers
+          tocMapping.set(cleanHref, entry);
+          if (entry.children) {
+            buildTocMapping(entry.children);
+          }
+        });
+      };
+      
+      buildTocMapping(tableOfContents);
+      console.log(`Built TOC mapping with ${tocMapping.size} href entries`);
+      
     } catch (error) {
       warnings.push(`Failed to parse navigation: ${error.message}`);
       console.warn(`Navigation parsing warning: ${error.message}`);
     }
     
-    // Process chapters from spine with enhanced performance
+    // Process chapters from spine with enhanced performance and content filtering
     const chapters: Chapter[] = [];
     let totalWordCount = 0;
+    let chapterNumber = 1; // Track actual content chapters separately from spine index
     
     for (let i = 0; i < packageData.spine.length; i++) {
       const spineItem = packageData.spine[i];
@@ -322,10 +592,33 @@ async function parseEpubContent(epubData: Uint8Array, filename: string): Promise
         const htmlContent = new TextDecoder().decode(chapterFile);
         const textContent = extractTextFromHtml(htmlContent);
         const wordCount = countWords(textContent);
+        
+        // Skip front-matter pages using modern EPUB structure analysis
+        if (isFrontMatterPage(htmlContent, textContent, wordCount, manifestItem)) {
+          console.log(`Skipped spine item ${i + 1}: front-matter page`);
+          continue;
+        }
+        
+        // Only count and include actual content chapters
         totalWordCount += wordCount;
         
-        // Extract chapter title from HTML using enhanced parser
-        const title = extractChapterTitleFast(htmlContent) || manifestItem.id || `Chapter ${i + 1}`;
+        // Extract chapter title using TOC mapping first, then fallback methods
+        const cleanHref = manifestItem.href.split('#')[0];
+        const tocEntry = tocMapping.get(cleanHref);
+        let title: string;
+        
+        if (tocEntry && tocEntry.title && !isFrontMatterTitle(tocEntry.title)) {
+          // Use title from TOC if available and meaningful
+          title = tocEntry.title;
+          console.log(`Using TOC title: "${title}"`);
+        } else {
+          // Fallback to enhanced title extraction
+          title = extractChapterTitleEnhanced(htmlContent, textContent, manifestItem.id);
+          console.log(`Using extracted title: "${title}"`);
+        }
+        
+        // Determine chapter level from TOC hierarchy
+        const level = tocEntry?.level || 1;
         
         chapters.push({
           id: manifestItem.id,
@@ -334,11 +627,12 @@ async function parseEpubContent(epubData: Uint8Array, filename: string): Promise
           htmlContent: htmlContent,
           textContent: textContent,
           wordCount: wordCount,
-          order: i,
-          level: 1
+          order: chapterNumber - 1, // 0-based for frontend
+          level: level
         });
         
-        console.log(`Processed chapter ${i + 1}: "${title}" (${wordCount} words)`);
+        console.log(`✅ Chapter ${chapterNumber}: "${title}" (${wordCount} words, level ${level})`);
+        chapterNumber++;
       } catch (error) {
         warnings.push(`Failed to process chapter ${i}: ${error.message}`);
         console.warn(`Chapter processing warning: ${error.message}`);
@@ -666,37 +960,85 @@ function parseNavigationDocumentRegex(navContent: string): TocEntry[] {
   return toc;
 }
 
-function extractChapterTitleFast(htmlContent: string): string | undefined {
+// Parse EPUB 2 NCX navigation files
+function parseNCXDocument(ncxContent: string): TocEntry[] {
+  const toc: TocEntry[] = [];
+  
   try {
+    console.log('Parsing NCX document with fast-xml-parser');
     if (!xmlParser) {
       throw new Error('fast-xml-parser not available, falling back to regex');
     }
-    const parsed = xmlParser.parse(htmlContent);
     
-    // Try to find title in common HTML structures
-    const title = parsed.html?.head?.title?.['#text'] ||
-                  parsed.html?.body?.h1?.['#text'] ||
-                  parsed.html?.body?.h2?.['#text'] ||
-                  parsed.h1?.['#text'] ||
-                  parsed.h2?.['#text'];
+    const parsed = xmlParser.parse(ncxContent);
+    const navMap = parsed.ncx?.navMap;
     
-    return title?.trim();
+    if (navMap?.navPoint) {
+      const navPoints = Array.isArray(navMap.navPoint) ? navMap.navPoint : [navMap.navPoint];
+      
+      const processNavPoint = (navPoint: any, level: number = 1): TocEntry => {
+        const id = navPoint['@_id'] || `ncx-${level}-${Math.random().toString(36).substr(2, 9)}`;
+        const playOrder = parseInt(navPoint['@_playOrder']) || 0;
+        
+        // Extract text and href
+        const navLabel = navPoint.navLabel;
+        const title = navLabel?.text?.['#text'] || navLabel?.text || navPoint['@_id'] || 'Untitled';
+        
+        const content = navPoint.content;
+        const href = content?.['@_src'] || '';
+        
+        const entry: TocEntry = {
+          id,
+          title: title.trim(),
+          href,
+          level,
+          playOrder
+        };
+        
+        // Handle nested navigation points
+        if (navPoint.navPoint) {
+          const childNavPoints = Array.isArray(navPoint.navPoint) ? navPoint.navPoint : [navPoint.navPoint];
+          entry.children = childNavPoints.map((child: any) => processNavPoint(child, level + 1));
+        }
+        
+        return entry;
+      };
+      
+      toc.push(...navPoints.map((navPoint: any) => processNavPoint(navPoint)));
+    }
+    
+    console.log(`NCX parsing completed: ${toc.length} top-level entries`);
+    return toc;
+    
   } catch (error) {
-    // Fallback to regex
-    const titlePatterns = [
-      /<h1[^>]*>([^<]*)<\/h1>/i,
-      /<h2[^>]*>([^<]*)<\/h2>/i,
-      /<title[^>]*>([^<]*)<\/title>/i
-    ];
+    console.warn(`NCX fast-xml-parser failed, falling back to regex: ${error.message}`);
     
-    for (const pattern of titlePatterns) {
-      const match = htmlContent.match(pattern);
-      if (match && match[1].trim()) {
-        return match[1].trim();
+    // Fallback regex parsing for NCX
+    const navPointMatches = ncxContent.match(/<navPoint[^>]*>.*?<\/navPoint>/gs) || [];
+    
+    for (let i = 0; i < navPointMatches.length; i++) {
+      const navPoint = navPointMatches[i];
+      
+      // Extract title
+      const textMatch = navPoint.match(/<text[^>]*>([^<]*)<\/text>/);
+      const title = textMatch ? textMatch[1].trim() : `Chapter ${i + 1}`;
+      
+      // Extract href
+      const contentMatch = navPoint.match(/<content[^>]*src=["']([^"']+)["']/);
+      const href = contentMatch ? contentMatch[1] : '';
+      
+      if (href) {
+        toc.push({
+          id: `ncx-${i}`,
+          title,
+          href,
+          level: 1,
+          playOrder: i
+        });
       }
     }
     
-    return undefined;
+    return toc;
   }
 }
 
@@ -782,7 +1124,14 @@ async function processEpubResourcesFast(files: ZipFiles, manifest: any[], packag
   return resources;
 }
 
-console.log("Enhanced EPUB parser with fflate, fast-xml-parser, and DOMPurify loaded!")
+console.log("🚀 Modern EPUB Parser v3.0 with Specialist Components:")
+console.log("  ✅ fflate - 4-8x faster ZIP extraction")
+console.log("  ✅ fast-xml-parser - Streaming XML with namespace support") 
+console.log("  ✅ DOMPurify + textContent - Clean prose extraction")
+console.log("  ✅ he - Complete HTML entity decoding")
+console.log("  ✅ EPUB 3 navigation + NCX fallback")
+console.log("  ✅ Smart front-matter detection")
+console.log("  ✅ TOC-driven chapter organization")
 
 Deno.serve(async (req) => {
   // Handle CORS
