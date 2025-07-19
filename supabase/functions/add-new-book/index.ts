@@ -303,7 +303,7 @@ function processHtmlFallback(html: string): string {
     .trim();
 }
 
-// Preserve basic formatting for frontend display - outputs clean HTML
+// Preserve basic formatting for frontend display - outputs clean, well-formed HTML
 function preserveBasicFormatting(html: string): string {
   let result = html;
   
@@ -322,49 +322,10 @@ function preserveBasicFormatting(html: string): string {
     .replace(/<img[^>]*\/?>/gi, '')
     .replace(/<hr[^>]*\/?>/gi, '')
     .replace(/<span[^>]*id[^>]*>[^<]*<\/span>/gi, '') // Remove anchor spans
-    .replace(/<div[^>]*(?:height|width)=[^>]*>/gi, '') // Remove layout divs
-    .replace(/<\/div>/gi, '')
+    .replace(/<a[^>]*href[^>]*>[^<]*<\/a>/gi, '') // Remove links (keep content)
     .replace(/<br\s*\/?>/gi, ' '); // Convert breaks to spaces
   
-  // Step 2: Convert formatting tags to clean modern HTML
-  result = result
-    .replace(/<b\b[^>]*>/gi, '<strong>')
-    .replace(/<\/b>/gi, '</strong>')
-    .replace(/<i\b[^>]*>/gi, '<em>')
-    .replace(/<\/i>/gi, '</em>')
-    .replace(/<u\b[^>]*>/gi, '<u>')
-    .replace(/<\/u>/gi, '</u>');
-  
-  // Step 3: Clean up font/color/size tags while preserving content
-  result = result
-    .replace(/<font[^>]*size="?[4-9]"?[^>]*>/gi, '<strong>') // Large text = bold
-    .replace(/<font[^>]*>/gi, '') // Remove other font tags
-    .replace(/<\/font>/gi, (match, offset, string) => {
-      // Close strong tags for size-based formatting
-      const beforeMatch = string.substring(0, offset);
-      const lastFontOpen = beforeMatch.lastIndexOf('<strong>');
-      const lastFontClose = beforeMatch.lastIndexOf('</strong>');
-      return lastFontOpen > lastFontClose ? '</strong>' : '';
-    });
-  
-  // Step 4: Process paragraphs properly
-  result = result
-    .replace(/<p\b[^>]*>/gi, '<p>')
-    .replace(/<\/p>\s*<p>/gi, '</p><p>') // Clean up paragraph spacing
-    .replace(/(<p>)\s+/gi, '<p>') // Remove whitespace after opening p
-    .replace(/\s+(<\/p>)/gi, '</p>'); // Remove whitespace before closing p
-  
-  // Step 5: Remove any remaining layout attributes/tags
-  result = result
-    .replace(/<[^>]*(?:height|width|align|size|color|font-|style)[^>]*>/gi, (match) => {
-      // If it's a formatting tag we want to keep, clean it
-      if (match.match(/<(strong|em|u|p)\b/i)) {
-        return match.replace(/\s+(?:height|width|align|size|color|font-[^=]*|style)="[^"]*"/gi, '');
-      }
-      return ''; // Remove other layout elements
-    });
-  
-  // Step 6: Decode HTML entities thoroughly
+  // Step 2: Decode HTML entities FIRST (before tag processing)
   result = result
     .replace(/&rsquo;/g, "'")
     .replace(/&lsquo;/g, "'")
@@ -374,10 +335,6 @@ function preserveBasicFormatting(html: string): string {
     .replace(/&mdash;/g, '—')
     .replace(/&hellip;/g, '…')
     .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
     .replace(/&eacute;/gi, 'é')
     .replace(/&egrave;/gi, 'è')
     .replace(/&ecirc;/gi, 'ê')
@@ -388,15 +345,58 @@ function preserveBasicFormatting(html: string): string {
     .replace(/&ouml;/gi, 'ö')
     .replace(/&auml;/gi, 'ä')
     .replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num)))
-    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&amp;/g, '&') // Do & last to avoid double-decoding
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"');
   
-  // Step 7: Final cleanup - remove any remaining unwanted tags
+  // Step 3: Clean and standardize formatting tags
   result = result
-    .replace(/<(?!\/?(strong|em|u|p)\b)[^>]+>/gi, ' ') // Keep only formatting tags
+    .replace(/<b\b[^>]*>/gi, '<strong>')
+    .replace(/<\/b>/gi, '</strong>')
+    .replace(/<i\b[^>]*>/gi, '<em>')
+    .replace(/<\/i>/gi, '</em>')
+    .replace(/<u\b[^>]*>/gi, '<u>')
+    .replace(/<\/u>/gi, '</u>');
+  
+  // Step 4: Handle font tags carefully (preserve content, convert large sizes to strong)
+  result = result
+    .replace(/<font[^>]*size\s*=\s*["']?([5-9]|[1-9][0-9])["']?[^>]*>/gi, '<strong>') // Large font = strong
+    .replace(/<font[^>]*>/gi, '') // Remove other font opening tags
+    .replace(/<\/font>/gi, '</strong>'); // Close font tags as strong (will be cleaned up later)
+  
+  // Step 5: Clean up paragraphs and remove layout attributes
+  result = result
+    .replace(/<p\b[^>]*>/gi, '<p>') // Clean paragraph opening tags
+    .replace(/<div[^>]*>/gi, '') // Remove div opening tags
+    .replace(/<\/div>/gi, '') // Remove div closing tags
+    .replace(/<center[^>]*>/gi, '') // Remove center tags
+    .replace(/<\/center>/gi, '');
+  
+  // Step 6: Remove any remaining layout/style tags but keep content
+  result = result
+    .replace(/<(?!\/?(strong|em|u|p)\b)[^>]*>/gi, ' ') // Remove all tags except formatting ones
     .replace(/\s+/g, ' ') // Normalize whitespace
-    .replace(/\s*<p>\s*/g, '<p>') // Clean paragraph spacing
-    .replace(/\s*<\/p>\s*/g, '</p>')
-    .replace(/(<\/p>)(\s*)(<p>)/g, '$1 $3') // Add space between paragraphs
+    .trim();
+  
+  // Step 7: Structure content into proper paragraphs
+  // Split by multiple spaces or line breaks and wrap in paragraphs
+  const sentences = result.split(/\s{2,}/).filter(s => s.trim().length > 0);
+  if (sentences.length > 1) {
+    result = sentences.map(sentence => `<p>${sentence.trim()}</p>`).join('\n');
+  } else if (result.trim()) {
+    result = `<p>${result.trim()}</p>`;
+  }
+  
+  // Step 8: Fix any malformed tags (cleanup broken strong/em tags)
+  result = result
+    .replace(/<\/strong>\s*<\/strong>/gi, '</strong>') // Remove double closing tags
+    .replace(/<strong>\s*<strong>/gi, '<strong>') // Remove double opening tags
+    .replace(/<\/em>\s*<\/em>/gi, '</em>')
+    .replace(/<em>\s*<em>/gi, '<em>')
+    .replace(/<p>\s*<\/p>/gi, '') // Remove empty paragraphs
+    .replace(/\n+/g, '\n') // Clean up line breaks
     .trim();
   
   console.log(`Formatted HTML output sample: ${result.substring(0, 200)}...`);
