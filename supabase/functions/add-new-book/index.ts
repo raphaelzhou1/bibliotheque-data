@@ -6,9 +6,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "@supabase/supabase-js"
 
-// Performance-optimized imports
-// Using dynamic imports to handle potential module resolution issues
-let fflate: any, XMLParser: any, DOMPurify: any, entities: any;
+// Server-friendly EPUB parsing components (no DOM dependencies)
+let fflate: any, XMLParser: any, htmlToText: any, nodeHtmlParser: any;
 
 try {
   const fflateModule = await import("https://esm.sh/fflate@0.8.1");
@@ -17,13 +16,15 @@ try {
   const xmlParserModule = await import("https://esm.sh/fast-xml-parser@4.3.4");
   XMLParser = xmlParserModule.XMLParser;
   
-  const domPurifyModule = await import("https://esm.sh/dompurify@3.0.8");
-  DOMPurify = domPurifyModule.default;
+  const htmlToTextModule = await import("https://esm.sh/html-to-text@9.0.4");
+  htmlToText = htmlToTextModule.htmlToText;
   
-  const heModule = await import("https://esm.sh/he@1.2.0");
-  entities = heModule;
+  const nodeHtmlParserModule = await import("https://esm.sh/node-html-parser@7.0.1");
+  nodeHtmlParser = nodeHtmlParserModule.parse;
+  
+  console.log("✅ Server-friendly parsing libraries loaded successfully");
 } catch (error) {
-  console.warn("Failed to load performance libraries, falling back to basic implementations");
+  console.warn("Failed to load parsing libraries, falling back to basic implementations");
   // Fallback implementations will be used
 }
 
@@ -182,97 +183,308 @@ if (XMLParser) {
   });
 }
 
-// Modern HTML text extraction using DOMPurify + textContent + he entity decoding
+// Extract clean text for word counting and search (plain text)
 function extractTextFromHtml(htmlContent: string): string {
-  console.log(`Processing HTML content (${htmlContent.length} chars) with modern parser`);
+  console.log(`Processing HTML content (${htmlContent.length} chars) for plain text extraction`);
   const startTime = performance.now();
   
   try {
-    // Step 1: Sanitize HTML with DOMPurify to remove XSS and normalize structure
-    let cleanHtml = htmlContent;
-    if (DOMPurify?.sanitize) {
-      cleanHtml = DOMPurify.sanitize(htmlContent, { 
-        RETURN_DOM: false,
-        ALLOWED_TAGS: [], // Strip all tags, keep only text content
-        KEEP_CONTENT: true // Preserve text inside removed tags
-      });
-      console.log(`DOMPurify sanitization completed`);
-    } else {
-      // Basic fallback: remove dangerous content
-      cleanHtml = htmlContent
-        .replace(/<script[^>]*>.*?<\/script>/gis, '')
-        .replace(/<style[^>]*>.*?<\/style>/gis, '')
-        .replace(/<head[^>]*>.*?<\/head>/gis, '');
-    }
+    // Strip Project Gutenberg boilerplate first
+    let cleanHtml = stripProjectGutenbergBoilerplate(htmlContent);
     
-    // Step 2: Use DOM parsing to extract clean text content
+    // Use html-to-text for robust server-side HTML processing
     let textContent = '';
-    
-    // Try using DOMParser for proper HTML parsing
-    try {
-      // Create a minimal DOM environment for text extraction
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(cleanHtml, 'text/html');
-      textContent = doc.documentElement.textContent || doc.body?.textContent || '';
-      console.log(`DOM textContent extraction successful`);
-    } catch (domError) {
-      console.warn(`DOM parsing failed, using regex fallback: ${domError.message}`);
-      // Fallback: regex-based tag removal
-      textContent = cleanHtml
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-    
-    // Step 3: Decode HTML entities using 'he' library for accurate Unicode
-    let finalText = textContent;
-    if (entities?.decode) {
-      finalText = entities.decode(textContent);
-      console.log(`HTML entities decoded with 'he' library`);
+    if (htmlToText) {
+      textContent = htmlToText(cleanHtml, {
+        wordwrap: false,
+        selectors: [
+          // Skip structural and boilerplate elements
+          { selector: 'head, script, style, meta, link', format: 'skip' },
+          { selector: 'table.pg-boilerplate, .pg-boilerplate', format: 'skip' },
+          { selector: '.toc, .table-of-contents', format: 'skip' },
+          { selector: '.footer, .header, .navigation', format: 'skip' },
+          { selector: '[height="0pt"], [width="0pt"]', format: 'skip' }, // Skip layout elements
+          { selector: 'img', format: 'skip' }, // Skip images for plain text
+          { selector: 'hr', format: 'skip' }, // Skip horizontal rules
+          { selector: 'span[id]', format: 'skip' } // Skip anchor spans
+        ],
+        formatters: {
+          'paragraph': (elem: any, walk: any, builder: any) => {
+            walk(elem.children, builder);
+            builder.addLineBreak();
+          }
+        }
+      });
+      console.log(`html-to-text processing completed successfully`);
     } else {
-      // Enhanced fallback entity decoding
-      finalText = textContent
-        .replace(/&rsquo;/g, "'")
-        .replace(/&lsquo;/g, "'")
-        .replace(/&rdquo;/g, '"')
-        .replace(/&ldquo;/g, '"')
-        .replace(/&ndash;/g, '–')
-        .replace(/&mdash;/g, '—')
-        .replace(/&hellip;/g, '…')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&eacute;/gi, 'é')
-        .replace(/&egrave;/gi, 'è')
-        .replace(/&ecirc;/gi, 'ê')
-        .replace(/&agrave;/gi, 'à')
-        .replace(/&acirc;/gi, 'â')
-        .replace(/&ccedil;/gi, 'ç')
-        .replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num)))
-        .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+      // Enhanced fallback processing
+      textContent = processHtmlFallback(cleanHtml);
+      console.log(`Fallback regex processing completed`);
     }
     
-    // Step 4: Final cleanup and normalization
-    finalText = finalText
+    // Final cleanup and normalization
+    const finalText = textContent
       .replace(/\s+/g, ' ') // Normalize whitespace
-      .replace(/\r\n|\r|\n/g, ' ') // Convert line breaks to spaces
       .trim();
     
     const processTime = performance.now() - startTime;
-    console.log(`Modern HTML processing completed in ${processTime.toFixed(2)}ms`);
+    console.log(`Plain text extraction completed in ${processTime.toFixed(2)}ms`);
     console.log(`Output: ${finalText.length} chars clean text`);
     
     return finalText;
   } catch (error) {
-    console.error(`Modern HTML processing failed: ${error.message}`);
+    console.error(`Plain text extraction failed: ${error.message}`);
+    return processHtmlFallback(htmlContent);
+  }
+}
+
+// Extract formatted HTML for frontend display (preserve meaningful formatting)
+function extractFormattedHtml(htmlContent: string): string {
+  console.log(`Processing HTML content (${htmlContent.length} chars) for formatted display`);
+  const startTime = performance.now();
+  
+  try {
+    // Strip Project Gutenberg boilerplate first
+    let cleanHtml = stripProjectGutenbergBoilerplate(htmlContent);
     
-    // Ultimate fallback to very basic processing
-    return htmlContent
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    // Use manual processing to ensure clean HTML output for frontend
+    const formattedContent = preserveBasicFormatting(cleanHtml);
+    
+    const processTime = performance.now() - startTime;
+    console.log(`Formatted HTML extraction completed in ${processTime.toFixed(2)}ms`);
+    return formattedContent;
+  } catch (error) {
+    console.error(`Formatted HTML extraction failed: ${error.message}`);
+    return preserveBasicFormatting(htmlContent);
+  }
+}
+
+// Enhanced fallback HTML processing
+function processHtmlFallback(html: string): string {
+  return html
+    // Remove structural elements
+    .replace(/<script[^>]*>.*?<\/script>/gis, '')
+    .replace(/<style[^>]*>.*?<\/style>/gis, '')
+    .replace(/<head[^>]*>.*?<\/head>/gis, '')
+    .replace(/<!DOCTYPE[^>]*>/gi, '')
+    .replace(/<html[^>]*>/gi, '')
+    .replace(/<\/html>/gi, '')
+    .replace(/<body[^>]*>/gi, '')
+    .replace(/<\/body>/gi, '')
+    .replace(/<meta[^>]*\/?>/gi, '')
+    .replace(/<link[^>]*\/?>/gi, '')
+    .replace(/<img[^>]*\/?>/gi, '')
+    .replace(/<hr[^>]*\/?>/gi, '')
+    .replace(/<span[^>]*id[^>]*>.*?<\/span>/gi, '')
+    // Remove all remaining HTML tags
+    .replace(/<[^>]+>/g, ' ')
+    // Decode entities
+    .replace(/&rsquo;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&rdquo;/g, '"')
+    .replace(/&ldquo;/g, '"')
+    .replace(/&ndash;/g, '–')
+    .replace(/&mdash;/g, '—')
+    .replace(/&hellip;/g, '…')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&eacute;/gi, 'é')
+    .replace(/&egrave;/gi, 'è')
+    .replace(/&ecirc;/gi, 'ê')
+    .replace(/&agrave;/gi, 'à')
+    .replace(/&acirc;/gi, 'â')
+    .replace(/&ccedil;/gi, 'ç')
+    .replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num)))
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Preserve basic formatting for frontend display - outputs clean HTML
+function preserveBasicFormatting(html: string): string {
+  let result = html;
+  
+  // Step 1: Remove structural/layout elements completely
+  result = result
+    .replace(/<script[^>]*>.*?<\/script>/gis, '')
+    .replace(/<style[^>]*>.*?<\/style>/gis, '')
+    .replace(/<head[^>]*>.*?<\/head>/gis, '')
+    .replace(/<!DOCTYPE[^>]*>/gi, '')
+    .replace(/<html[^>]*>/gi, '')
+    .replace(/<\/html>/gi, '')
+    .replace(/<body[^>]*>/gi, '')
+    .replace(/<\/body>/gi, '')
+    .replace(/<meta[^>]*\/?>/gi, '')
+    .replace(/<link[^>]*\/?>/gi, '')
+    .replace(/<img[^>]*\/?>/gi, '')
+    .replace(/<hr[^>]*\/?>/gi, '')
+    .replace(/<span[^>]*id[^>]*>[^<]*<\/span>/gi, '') // Remove anchor spans
+    .replace(/<div[^>]*(?:height|width)=[^>]*>/gi, '') // Remove layout divs
+    .replace(/<\/div>/gi, '')
+    .replace(/<br\s*\/?>/gi, ' '); // Convert breaks to spaces
+  
+  // Step 2: Convert formatting tags to clean modern HTML
+  result = result
+    .replace(/<b\b[^>]*>/gi, '<strong>')
+    .replace(/<\/b>/gi, '</strong>')
+    .replace(/<i\b[^>]*>/gi, '<em>')
+    .replace(/<\/i>/gi, '</em>')
+    .replace(/<u\b[^>]*>/gi, '<u>')
+    .replace(/<\/u>/gi, '</u>');
+  
+  // Step 3: Clean up font/color/size tags while preserving content
+  result = result
+    .replace(/<font[^>]*size="?[4-9]"?[^>]*>/gi, '<strong>') // Large text = bold
+    .replace(/<font[^>]*>/gi, '') // Remove other font tags
+    .replace(/<\/font>/gi, (match, offset, string) => {
+      // Close strong tags for size-based formatting
+      const beforeMatch = string.substring(0, offset);
+      const lastFontOpen = beforeMatch.lastIndexOf('<strong>');
+      const lastFontClose = beforeMatch.lastIndexOf('</strong>');
+      return lastFontOpen > lastFontClose ? '</strong>' : '';
+    });
+  
+  // Step 4: Process paragraphs properly
+  result = result
+    .replace(/<p\b[^>]*>/gi, '<p>')
+    .replace(/<\/p>\s*<p>/gi, '</p><p>') // Clean up paragraph spacing
+    .replace(/(<p>)\s+/gi, '<p>') // Remove whitespace after opening p
+    .replace(/\s+(<\/p>)/gi, '</p>'); // Remove whitespace before closing p
+  
+  // Step 5: Remove any remaining layout attributes/tags
+  result = result
+    .replace(/<[^>]*(?:height|width|align|size|color|font-|style)[^>]*>/gi, (match) => {
+      // If it's a formatting tag we want to keep, clean it
+      if (match.match(/<(strong|em|u|p)\b/i)) {
+        return match.replace(/\s+(?:height|width|align|size|color|font-[^=]*|style)="[^"]*"/gi, '');
+      }
+      return ''; // Remove other layout elements
+    });
+  
+  // Step 6: Decode HTML entities thoroughly
+  result = result
+    .replace(/&rsquo;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&rdquo;/g, '"')
+    .replace(/&ldquo;/g, '"')
+    .replace(/&ndash;/g, '–')
+    .replace(/&mdash;/g, '—')
+    .replace(/&hellip;/g, '…')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&eacute;/gi, 'é')
+    .replace(/&egrave;/gi, 'è')
+    .replace(/&ecirc;/gi, 'ê')
+    .replace(/&agrave;/gi, 'à')
+    .replace(/&acirc;/gi, 'â')
+    .replace(/&ccedil;/gi, 'ç')
+    .replace(/&uuml;/gi, 'ü')
+    .replace(/&ouml;/gi, 'ö')
+    .replace(/&auml;/gi, 'ä')
+    .replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num)))
+    .replace(/&#x([0-9a-f]+);/gi, (match, hex) => String.fromCharCode(parseInt(hex, 16)));
+  
+  // Step 7: Final cleanup - remove any remaining unwanted tags
+  result = result
+    .replace(/<(?!\/?(strong|em|u|p)\b)[^>]+>/gi, ' ') // Keep only formatting tags
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .replace(/\s*<p>\s*/g, '<p>') // Clean paragraph spacing
+    .replace(/\s*<\/p>\s*/g, '</p>')
+    .replace(/(<\/p>)(\s*)(<p>)/g, '$1 $3') // Add space between paragraphs
+    .trim();
+  
+  console.log(`Formatted HTML output sample: ${result.substring(0, 200)}...`);
+  return result;
+}
+
+// Strip Project Gutenberg boilerplate sections
+function stripProjectGutenbergBoilerplate(html: string): string {
+  // Remove PG header/footer blocks
+  return html
+    .replace(/\*\*\*\s*START\s+OF\s+THE?\s+PROJECT\s+GUTENBERG[\s\S]*?\*\*\*\s*END[\s\S]*?\*\*\*/gi, '')
+    .replace(/Produced by[^.]*\./gi, '')
+    .replace(/Project Gutenberg[^.]*\./gi, '');
+}
+
+// Slice HTML content by navigation anchors to get true chapter sections
+function sliceSection(html: string, anchor: string, nextAnchors: string[] = []): string {
+  console.log(`Slicing section from anchor: ${anchor}, until next: ${nextAnchors.join(', ')}`);
+  
+  try {
+    if (!nodeHtmlParser) {
+      console.warn(`node-html-parser not available, returning full content`);
+      return html;
+    }
+    
+    // Parse HTML with node-html-parser (server-friendly, no DOM)
+    const root = nodeHtmlParser(html, { 
+      lowerCaseTagName: false, 
+      script: false, 
+      style: false,
+      blockTextElements: {
+        script: true,
+        noscript: true,
+        style: true,
+        pre: true
+      }
+    });
+    
+    // Find the start anchor element
+    const startElement = root.querySelector(`#${anchor}`);
+    if (!startElement) {
+      console.warn(`Anchor #${anchor} not found, returning full content`);
+      return html;
+    }
+    
+    // Collect content from start element until we hit a next anchor
+    const slice: string[] = [];
+    let currentNode: any = startElement;
+    
+    // Start with the anchor element itself
+    slice.push(currentNode.outerHTML || currentNode.toString());
+    
+    // Walk through siblings until we find a next anchor or reach the end
+    while (currentNode.nextSibling) {
+      currentNode = currentNode.nextSibling;
+      
+      // Check if this node or any of its children contains a next anchor
+      const nodeId = currentNode.getAttribute?.('id');
+      if (nodeId && nextAnchors.includes(nodeId)) {
+        break; // Stop here, we've reached the next section
+      }
+      
+      // Check for anchor IDs in child elements
+      let foundNextAnchor = false;
+      if (currentNode.querySelectorAll) {
+        for (const nextAnchor of nextAnchors) {
+          if (currentNode.querySelector(`#${nextAnchor}`)) {
+            foundNextAnchor = true;
+            break;
+          }
+        }
+      }
+      
+      if (foundNextAnchor) {
+        break;
+      }
+      
+      // Add this node to our slice
+      slice.push(currentNode.outerHTML || currentNode.toString());
+    }
+    
+    const slicedHtml = slice.join('');
+    console.log(`Successfully sliced ${slice.length} elements, ${slicedHtml.length} chars`);
+    return slicedHtml;
+    
+  } catch (error) {
+    console.warn(`Section slicing failed: ${error.message}, returning full content`);
+    return html;
   }
 }
 
@@ -293,17 +505,31 @@ function isFrontMatterPage(htmlContent: string, textContent: string, wordCount: 
     return true;
   }
   
-  // Rule 3: Common front-matter patterns (author, title, copyright, etc.)
+  // Rule 3: Enhanced front-matter patterns (author, title, copyright, etc.)
   const frontMatterPatterns = [
-    // Author name only
+    // Author names (common classics)
     /^(albert\s+)?camus\s*$/i,
     /^(antoine\s+de\s+)?saint[- ]exupéry\s*$/i,
+    /^gustave\s+flaubert\s*$/i,
+    /^victor\s+hugo\s*$/i,
+    /^émile\s+zola\s*$/i,
+    /^marcel\s+proust\s*$/i,
     
-    // Title pages
+    // Classic French titles
     /^l[''']étranger\s*$/i,
     /^(le\s+)?petit[- ]prince\s*$/i,
+    /^madame\s+bovary\s*$/i,
+    /^les\s+misérables\s*$/i,
+    /^à\s+la\s+recherche\s+du\s+temps\s+perdu\s*$/i,
+    
+    // English titles
     /^the\s+stranger\s*$/i,
     /^the\s+little\s+prince\s*$/i,
+    
+    // Publication info
+    /^\(\d{4}\)\s*$/i, // (1857)
+    /^\d{4}\s*$/i, // 1857
+    /^(publié|published)\s+en\s+\d{4}/i,
     
     // Part/section dividers
     /^(première|deuxième|troisième)\s+partie\s*$/i,
@@ -320,15 +546,25 @@ function isFrontMatterPage(htmlContent: string, textContent: string, wordCount: 
     /^(tous\s+droits\s+réservés|all\s+rights\s+reserved)/i,
     /^(éditions?|publisher?)/i,
     
-    // TOC/Navigation
+    // Navigation/TOC
     /^(table\s+des?\s+matières?|contents?|sommaire)\s*$/i,
+    /^(à\s+propos\s+de\s+cette\s+édition|about\s+this\s+edition)/i,
     
-    // Standalone roman numerals or numbers (page markers)
-    /^[ivxlc]+\s*$/i,
-    /^\d+\s*$/,
+    // Dedication patterns
+    /^à\s+[a-zàâäéèêëïîôöùûü\s\-]+$/i, // "À Marie-Antoine-Jules Senard"
+    /^(cher\s+et\s+illustre\s+ami|dear\s+friend)/i,
+    /^(membre\s+du\s+barreau|member\s+of\s+the\s+bar)/i,
+    /^(permettez[- ]moi|allow\s+me)/i,
     
-    // Dedication/Foreword
-    /^(dédicace?|dedication|avant[- ]propos|foreword|préface|preface)\s*$/i
+    // Standalone elements
+    /^[ivxlc]+\s*$/i, // Roman numerals
+    /^\d+\s*$/i, // Numbers only
+    /^[a-z]\s*$/i, // Single letters
+    
+    // Common front-matter sections
+    /^(dédicace?|dedication|avant[- ]propos|foreword|préface|preface)\s*$/i,
+    /^(remerciements?|acknowledgments?)\s*$/i,
+    /^(introduction|présentation)\s*$/i
   ];
   
   // Check if the entire text matches front-matter patterns
@@ -439,10 +675,7 @@ function extractChapterTitleEnhanced(htmlContent: string, textContent: string, m
       if (match && match[1].trim()) {
         let title = match[1].trim();
         
-        // Decode entities in the title
-        if (entities?.decodeHTML) {
-          title = entities.decodeHTML(title);
-        }
+        // Entity decoding is now handled by html-to-text library
         
         return title;
       }
@@ -567,75 +800,177 @@ async function parseEpubContent(epubData: Uint8Array, filename: string): Promise
       console.warn(`Navigation parsing warning: ${error.message}`);
     }
     
-    // Process chapters from spine with enhanced performance and content filtering
+    // Process chapters using navigation anchors for proper chapter splitting
     const chapters: Chapter[] = [];
     let totalWordCount = 0;
-    let chapterNumber = 1; // Track actual content chapters separately from spine index
+    let chapterNumber = 1;
     
-    for (let i = 0; i < packageData.spine.length; i++) {
-      const spineItem = packageData.spine[i];
-      try {
-        const manifestItem = packageData.manifest.find(item => item.id === spineItem.idref);
-        if (!manifestItem) {
-          warnings.push(`Spine item ${spineItem.idref} not found in manifest`);
-          continue;
-        }
-        
-        const chapterPath = resolveHref(packagePath, manifestItem.href);
-        const chapterFile = files[chapterPath];
-        
-        if (!chapterFile) {
-          warnings.push(`Chapter file not found: ${chapterPath}`);
-          continue;
-        }
-        
-        const htmlContent = new TextDecoder().decode(chapterFile);
-        const textContent = extractTextFromHtml(htmlContent);
-        const wordCount = countWords(textContent);
-        
-        // Skip front-matter pages using modern EPUB structure analysis
-        if (isFrontMatterPage(htmlContent, textContent, wordCount, manifestItem)) {
-          console.log(`Skipped spine item ${i + 1}: front-matter page`);
-          continue;
-        }
-        
-        // Only count and include actual content chapters
-        totalWordCount += wordCount;
-        
-        // Extract chapter title using TOC mapping first, then fallback methods
-        const cleanHref = manifestItem.href.split('#')[0];
-        const tocEntry = tocMapping.get(cleanHref);
-        let title: string;
-        
-        if (tocEntry && tocEntry.title && !isFrontMatterTitle(tocEntry.title)) {
-          // Use title from TOC if available and meaningful
-          title = tocEntry.title;
-          console.log(`Using TOC title: "${title}"`);
-        } else {
-          // Fallback to enhanced title extraction
-          title = extractChapterTitleEnhanced(htmlContent, textContent, manifestItem.id);
-          console.log(`Using extracted title: "${title}"`);
-        }
-        
-        // Determine chapter level from TOC hierarchy
-        const level = tocEntry?.level || 1;
-        
-        chapters.push({
-          id: manifestItem.id,
-          title: title,
-          href: manifestItem.href,
-          htmlContent: htmlContent,
-          textContent: textContent,
-          wordCount: wordCount,
-          order: chapterNumber - 1, // 0-based for frontend
-          level: level
+    // First, try to process chapters by TOC navigation anchors
+    if (tableOfContents.length > 0) {
+      console.log(`🔄 Processing chapters by navigation anchors (${tableOfContents.length} TOC entries)`);
+      
+      // Build list of all anchors in reading order
+      const allAnchors: { anchor: string, title: string, href: string, level: number }[] = [];
+      const collectAnchors = (entries: TocEntry[]) => {
+        entries.forEach(entry => {
+          if (entry.href.includes('#')) {
+            const [file, anchor] = entry.href.split('#');
+            if (anchor) {
+              allAnchors.push({
+                anchor: anchor,
+                title: entry.title,
+                href: entry.href,
+                level: entry.level
+              });
+            }
+          }
+          if (entry.children) {
+            collectAnchors(entry.children);
+          }
         });
-        
-        console.log(`✅ Chapter ${chapterNumber}: "${title}" (${wordCount} words, level ${level})`);
-        chapterNumber++;
-      } catch (error) {
-        warnings.push(`Failed to process chapter ${i}: ${error.message}`);
-        console.warn(`Chapter processing warning: ${error.message}`);
+      };
+      collectAnchors(tableOfContents);
+      
+      // Group anchors by file
+      const anchorsByFile = new Map<string, typeof allAnchors>();
+      allAnchors.forEach(anchorInfo => {
+        const [file] = anchorInfo.href.split('#');
+        if (!anchorsByFile.has(file)) {
+          anchorsByFile.set(file, []);
+        }
+        anchorsByFile.get(file)!.push(anchorInfo);
+      });
+      
+      // Process each file's anchors
+      for (const [fileName, anchors] of anchorsByFile) {
+        try {
+          // Find the spine file
+          const manifestItem = packageData.manifest.find(item => item.href === fileName);
+          if (!manifestItem) continue;
+          
+          const filePath = resolveHref(packagePath, fileName);
+          const fileData = files[filePath];
+          if (!fileData) continue;
+          
+          const fullHtmlContent = new TextDecoder().decode(fileData);
+          
+          // Process each anchor in this file
+          for (let j = 0; j < anchors.length; j++) {
+            const anchor = anchors[j];
+            const nextAnchors = anchors.slice(j + 1).map(a => a.anchor);
+            
+            try {
+                             // Slice the HTML content for this specific section
+               const sectionHtml = sliceSection(fullHtmlContent, anchor.anchor, nextAnchors);
+               const textContent = extractTextFromHtml(sectionHtml);
+               const formattedContent = extractFormattedHtml(sectionHtml);
+               const wordCount = countWords(textContent);
+               
+               // Skip front-matter sections
+               if (isFrontMatterPage(sectionHtml, textContent, wordCount, manifestItem) || 
+                   isFrontMatterTitle(anchor.title)) {
+                 console.log(`Skipped anchor "${anchor.title}": front-matter section`);
+                 continue;
+               }
+               
+               // Only include substantial content sections
+               if (wordCount < 50) {
+                 console.log(`Skipped anchor "${anchor.title}": too short (${wordCount} words)`);
+                 continue;
+               }
+               
+               totalWordCount += wordCount;
+               
+               chapters.push({
+                 id: `${manifestItem.id}_${anchor.anchor}`,
+                 title: anchor.title,
+                 href: anchor.href,
+                 htmlContent: formattedContent, // Formatted HTML for frontend display
+                 textContent: textContent, // Plain text for search/word count
+                 wordCount: wordCount,
+                 order: chapterNumber - 1,
+                 level: anchor.level
+               });
+              
+              console.log(`✅ Chapter ${chapterNumber}: "${anchor.title}" (${wordCount} words, level ${anchor.level})`);
+              chapterNumber++;
+              
+            } catch (error) {
+              console.warn(`Failed to process anchor ${anchor.anchor}: ${error.message}`);
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to process file ${fileName}: ${error.message}`);
+        }
+      }
+    }
+    
+    // Fallback: process spine items as whole chapters if no navigation anchors found
+    if (chapters.length === 0) {
+      console.log(`⚠️ No navigation anchors found, falling back to spine-based processing`);
+      
+      for (let i = 0; i < packageData.spine.length; i++) {
+        const spineItem = packageData.spine[i];
+        try {
+          const manifestItem = packageData.manifest.find(item => item.id === spineItem.idref);
+          if (!manifestItem) {
+            warnings.push(`Spine item ${spineItem.idref} not found in manifest`);
+            continue;
+          }
+          
+          const chapterPath = resolveHref(packagePath, manifestItem.href);
+          const chapterFile = files[chapterPath];
+          
+          if (!chapterFile) {
+            warnings.push(`Chapter file not found: ${chapterPath}`);
+            continue;
+          }
+          
+          const htmlContent = new TextDecoder().decode(chapterFile);
+          const textContent = extractTextFromHtml(htmlContent);
+          const formattedContent = extractFormattedHtml(htmlContent);
+          const wordCount = countWords(textContent);
+          
+          // Skip front-matter pages using modern EPUB structure analysis
+          if (isFrontMatterPage(htmlContent, textContent, wordCount, manifestItem)) {
+            console.log(`Skipped spine item ${i + 1}: front-matter page`);
+            continue;
+          }
+          
+          totalWordCount += wordCount;
+          
+          // Extract chapter title using TOC mapping first, then fallback methods
+          const cleanHref = manifestItem.href.split('#')[0];
+          const tocEntry = tocMapping.get(cleanHref);
+          let title: string;
+          
+          if (tocEntry && tocEntry.title && !isFrontMatterTitle(tocEntry.title)) {
+            title = tocEntry.title;
+            console.log(`Using TOC title: "${title}"`);
+          } else {
+            title = extractChapterTitleEnhanced(htmlContent, textContent, manifestItem.id);
+            console.log(`Using extracted title: "${title}"`);
+          }
+          
+          const level = tocEntry?.level || 1;
+          
+          chapters.push({
+            id: manifestItem.id,
+            title: title,
+            href: manifestItem.href,
+            htmlContent: formattedContent, // Formatted HTML for frontend display
+            textContent: textContent, // Plain text for search/word count
+            wordCount: wordCount,
+            order: chapterNumber - 1,
+            level: level
+          });
+          
+          console.log(`✅ Fallback Chapter ${chapterNumber}: "${title}" (${wordCount} words, level ${level})`);
+          chapterNumber++;
+        } catch (error) {
+          warnings.push(`Failed to process spine chapter ${i}: ${error.message}`);
+          console.warn(`Spine chapter processing warning: ${error.message}`);
+        }
       }
     }
     
@@ -1124,14 +1459,15 @@ async function processEpubResourcesFast(files: ZipFiles, manifest: any[], packag
   return resources;
 }
 
-console.log("🚀 Modern EPUB Parser v3.0 with Specialist Components:")
+console.log("🚀 Server-Friendly EPUB Parser v3.0 with True Chapter Splitting:")
 console.log("  ✅ fflate - 4-8x faster ZIP extraction")
 console.log("  ✅ fast-xml-parser - Streaming XML with namespace support") 
-console.log("  ✅ DOMPurify + textContent - Clean prose extraction")
-console.log("  ✅ he - Complete HTML entity decoding")
+console.log("  ✅ html-to-text - Clean prose extraction (no DOM dependencies)")
+console.log("  ✅ node-html-parser - Server-friendly HTML parsing")
+console.log("  ✅ Navigation anchor slicing - True chapter boundaries")
+console.log("  ✅ Project Gutenberg boilerplate removal")
 console.log("  ✅ EPUB 3 navigation + NCX fallback")
 console.log("  ✅ Smart front-matter detection")
-console.log("  ✅ TOC-driven chapter organization")
 
 Deno.serve(async (req) => {
   // Handle CORS
